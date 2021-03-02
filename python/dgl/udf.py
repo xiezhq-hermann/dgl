@@ -1,6 +1,35 @@
 """User-defined function related data structures."""
 from __future__ import absolute_import
 
+import torch
+from typing import Dict
+
+@torch.jit.script
+class EdgeBatch_message(object):
+    def __init__(self, src_data: Dict[str, torch.Tensor], edge_data: Dict[str, torch.Tensor], dst_data: Dict[str, torch.Tensor], a, b, c, d):
+        self._src_data = src_data
+        self._edge_data = edge_data
+        self._dst_data = dst_data
+        self.reduce_nodes = a
+        self.reduce_src = b
+        self.reduce_edges = c
+        self.reduce_offset = d
+    
+    @property
+    def src(self):
+        # features from source nodes
+        return self._src_data
+
+    @property
+    def dst(self):
+        # features from destination nodes
+        return self._src_data
+
+    @property
+    def data(self):
+        # features on edges
+        return self._edge_data
+
 class EdgeBatch(object):
     """The class that can represent a batch of edges.
 
@@ -230,6 +259,41 @@ class EdgeBatch(object):
         """Return the canonical edge type (i.e. triplet of source, edge, and
         destination node type) for this edge batch."""
         return self._etype
+
+# temporary path for the hyper message operators
+from pathlib import Path
+home = str(Path.home())
+torch.ops.load_library(str(Path.home()) + "/.dgl/hyper_message/libhyper_message.so")
+
+# Python builtin <built-in method forward of PyCapsule object> is currently not supported in Torchscript
+# import hyper_message
+@torch.jit.script
+class NodeBatch_reduce(object):
+    def __init__(self, nodes: torch.Tensor, data: Dict[str, torch.Tensor], msgs: Dict[str, torch.Tensor], num_square_edge:int, a, b, c, d, e):
+        self._nodes = nodes
+        self._data = data
+        self._msgs = msgs
+        self.num_square_edge = num_square_edge
+        self.reduce_nodes = a
+        self.reduce_src = b
+        self.reduce_edges = c
+        self.reduce_offset = d
+        self.reduce_square_offset = e
+
+    @property
+    def data(self) -> Dict[str, torch.Tensor]:
+        # features on nodes
+        return self._data
+    
+    @property
+    def mailbox(self) -> Dict[str, torch.Tensor]:
+        # messages from incoming edges
+        return self._msgs
+
+    def hyper_message(self, message) -> torch.Tensor:
+        # broadcasting the message of one edge to all edges that share the same destination nodes
+        broadcast = torch.ops.my_ops.hyper_message(message, self.num_square_edge, self.reduce_nodes, self.reduce_src, self.reduce_edges, self.reduce_offset, self.reduce_square_offset)
+        return broadcast
 
 class NodeBatch(object):
     """The class to represent a batch of nodes.

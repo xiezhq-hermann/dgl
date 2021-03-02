@@ -4682,7 +4682,9 @@ class DGLHeteroGraph(object):
         etid = self.get_etype_id(etype)
         etype = self.canonical_etypes[etid]
         _, dtid = self._graph.metagraph.find_edge(etid)
-        g = self if etype is None else self[etype]
+        # g = self if etype is None else self[etype]
+        # ad hoc approaches to preserve the attributes, i.e. encoded graph structure
+        g = self
         ndata = core.message_passing(g, message_func, reduce_func, apply_node_func)
         self._set_n_repr(dtid, ALL, ndata)
 

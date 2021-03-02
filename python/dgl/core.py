@@ -6,8 +6,11 @@ from .base import DGLError, is_all, NID, EID, ALL, dgl_warning
 from . import backend as F
 from . import function as fn
 from .frame import Frame
-from .udf import NodeBatch, EdgeBatch
+from .udf import NodeBatch, EdgeBatch, NodeBatch_reduce, EdgeBatch_message
 from . import ops
+
+import torch
+from typing import Dict
 
 def is_builtin(func):
     """Return true if the function is a DGL builtin function."""
@@ -67,8 +70,12 @@ def invoke_edge_udf(graph, eid, etype, func, *, orig_eid=None):
     dict[str, Tensor]
         Results from running the UDF.
     """
+    @torch.jit.script
+    def create_batch(srcdata: Dict[str, torch.Tensor], edge_data: Dict[str, torch.Tensor], dst_data: Dict[str, torch.Tensor], a, b, c, d):
+        # use this construct function for better debugging information
+        return EdgeBatch_message(srcdata, edge_data, dst_data, a, b, c, d)
+
     etid = graph.get_etype_id(etype)
-    stid, dtid = graph._graph.metagraph.find_edge(etid)
     if is_all(eid):
         u, v, eid = graph.edges(form='all')
         edata = graph._edge_frames[etid]
@@ -78,13 +85,38 @@ def invoke_edge_udf(graph, eid, etype, func, *, orig_eid=None):
     if len(u) == 0:
         dgl_warning('The input graph for the user-defined edge function ' \
                     'does not contain valid edges')
-    srcdata = graph._node_frames[stid].subframe(u)
-    dstdata = graph._node_frames[dtid].subframe(v)
-    ebatch = EdgeBatch(graph, eid if orig_eid is None else orig_eid,
-                       etype, srcdata, edata, dstdata)
+
+    # Todo: a graph pass to make the verdict that whether scattering features or not
+    if isinstance(func, torch.jit.ScriptFunction):
+        # ad hoc source and destination data for a whole graph
+        srcdata = dstdata = graph.ndata
+        ebatch = create_batch(srcdata, edata, dstdata, graph.reduce_nodes, graph.reduce_src, graph.reduce_edges, graph.reduce_offset)
+    else:
+        stid, dtid = graph._graph.metagraph.find_edge(etid)
+        srcdata = graph._node_frames[stid].subframe(u)
+        dstdata = graph._node_frames[dtid].subframe(v)
+        ebatch = EdgeBatch(graph, eid if orig_eid is None else orig_eid,
+                        etype, srcdata, edata, dstdata)
     return func(ebatch)
 
 def invoke_udf_reduce(graph, func, msgdata, *, orig_nid=None):
+    @torch.jit.script
+    def create_batch(nodes: torch.Tensor, data: Dict[str, torch.Tensor], msgs: Dict[str, torch.Tensor], num_square_edge:int, a, b, c, d, e):
+        # use this construct function for better debugging information
+        return NodeBatch_reduce(nodes, data, msgs, num_square_edge, a, b, c, d, e)
+
+    if isinstance(func, torch.jit.ScriptFunction):
+        # ad hoc for homo graph
+        # Todo: heterograph
+        # ntype = graph.dsttypes[0]
+        # ntid = graph.get_ntype_id_from_dst(ntype)
+        # ndata = graph._node_frames[ntid]
+        # nbatch = NodeBatch_reduce(graph.reduce_nodes, ndata, msgdata, graph.num_square_edge, graph.reduce_nodes, graph.reduce_src, graph.reduce_edges, graph.reduce_offset, graph.reduce_square_offset)
+        nbatch = create_batch(graph.reduce_nodes, graph.nodes[graph.dsttypes[0]].data, msgdata, graph.num_square_edge, graph.reduce_nodes, graph.reduce_src, graph.reduce_edges, graph.reduce_offset, graph.reduce_square_offset)
+        return func(nbatch, graph.num_square_edge, graph.reduce_nodes, graph.reduce_src, graph.reduce_edges, graph.reduce_offset, graph.reduce_square_offset)
+    return invoke_udf_reduce_bucketing(graph, func, msgdata, orig_nid=orig_nid)
+
+def invoke_udf_reduce_bucketing(graph, func, msgdata, *, orig_nid=None):
     """Invoke user-defined reduce function on all the nodes in the graph.
 
     It analyzes the graph, groups nodes by their degrees and applies the UDF on each
